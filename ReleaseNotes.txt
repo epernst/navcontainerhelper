@@ -1,5 +1,65 @@
+1.0.8
+Issue #1329 test whether containername is in hsts preload list
+Add function Sort-AppFilesByDependencies for sorting an array of app files by dependencies
+Sort apps before install in Publish-BcContainerApp
+Add PrevousApps, AppSourceCopMandatoryAffixes and AppSourceCopSupportedCountries to Run-AlPipeline
+Move decision on whether or not to rebuild image from New-BcContainer to New-BcImage and always call
+Add parameter -skipIfImageAlreadyExists to New-BcImage
+Issue #1343 Publish-BcContainerApp with ShowMyCode fails if replaceDependencies is not Set
+Add parameters appPublisher and language to Install-BcContainerApp
+Add parameter appPublisher Sync-BcContainerApp
+Issue #1337 Add tenant parameter to Install-TestToolkitToBcContainer
+Add parameter description to Run-AlPipeline
+Set JUnit as default output from Run-AlPipeline
+
+1.0.7
+Issue #1299 wait for symbol file to be available in container
+Add parameter AssignPremiumPlan to Run-AlPipeline
+Support reading defaultNewContainerParameters from config file
+Add tenant to Run-AlPipeline to allow running the pipeline in a tenant
+Add ability to override functions
+Addiional fixes to Run-AlPipeline
+Issue #1313 -includeAL fails when using a hostHelperFolder, which is different from the containerhelperfolder
+Issue #1316 New-BcContainerWizard converts license file url to lowercase
+Add support for JUnit to Run-Tests
+Add parameter testResultsFormat to Run-AlPipeline
+Do not fail on missing image in New-BcImage (only warn)
+Add properties to JUnit output
+
+1.0.6
+Add 3 new values for Select: Current, NextMinor and NextMajor for selecting artifacts. SasToken needs to be provided for NextMajor and NextMinor
+Publish-BcContainerApp now supports .zip files. All .app files in the .zip file are published in alphabetic order
+Run-AlPipeline to add sequence numbers (dependencies) to apps in artifacts if more than one app is added
+
+1.0.5
+Added PREVIEW function Run-AlPipeline
+Issue #1252 do not return artifact url for artifacts without platform (unless -doNotCheckPlatform is specified)
+Issue #1263 new-bccontainertenant freezes if -updatehosts isn't specified
+Add switch -includePerformanceToolkit to Import-TestToolkitToBcContainer and New-BcContainer
+Support for -includePerformanceToolkit in New-BcContainerWizard
+Support for insider builds and sasToken in New-BcContainerWizard
+Add NAV to New-BcContainerWizard
+Add AL Language Extension version selection to New-BcContainerWizard
+Flush-ContainerHelperCache will remove images, which was built on artifacts, which is no longer in the cache
+
+1.0.4
+Sort-AppFoldersByDependencies doesn't support custom Application app (needs to be sorted first)
+Add parameter -addFontsFromPath to New-BcContainer and New-BcImage
+Increase performance of Add-FontsToBcContainer
+Ensure that Import-TestToolkitToBcContainer can be called repeatedly
+Include TestToolkit in cached image if possible
+Add parameter -forceRebuild to New-NavContainer to force a rebuild of a cached image
+Pull new generic if not at least 0.1.0.16 (to ensure download fixes)
+Add/Remove hostnames for tenants to hosts file when multitenancy and -updatehosts
+New-BcContainerWizard to support -includeAL and -multitenant
+Added new function Set-BcContainerFeatureKeys to enable/disable feature keys in tenant databases
+Add parameter -featureKeys to New-BcContainer to enable/disable feature keys in all tenants in new container
+Issue #1243 - Get-BcContainerImageTags and Get-BcContainerImageLabels doesn't work if TLS 1.2 isn't enabled
+
 1.0.3
 Issue #1215 New-BcContainer with -useBestContainerOS and -useNewDatabase fails with multitenant sandbox images
+Issue #1220 Generate-SymbolsInNavContainer.ps1 does not have BC alias
+Fix missing pre-requisites
 
 1.0.2
 Issue #1202 New-BcContainer gives wrong message if no artifactUrl nor imagename is specified

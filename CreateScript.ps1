@@ -324,18 +324,25 @@ $Step = @{
     "Authentication"     = 3
     "ContainerName"      = 4
     "Version"            = 5
-    "Version2"           = 6
-    "Country"            = 7
-    "Toolkit"            = 8
-    "PremiumPlan"        = 9
-    "CreateTestUsers"    = 10
-    "License"            = 11
-    "Database"           = 12
-    "DNS"                = 13
-    "SSL"                = 14
-    "Isolation"          = 20
-    "Memory"             = 21
-    "IncludeCSIDE"       = 40
+    "SasToken"           = 6
+    "Version2"           = 7
+    "Country"            = 8
+    "TestToolkit"        = 9
+    "PerformanceToolkit" = 10
+    "PremiumPlan"        = 11
+    "CreateTestUsers"    = 12
+    "IncludeAL"          = 20
+    "ExportAlSource"     = 21
+    "IncludeCSIDE"       = 22
+    "ExportCAlSource"    = 23
+    "Vsix"               = 24
+    "License"            = 30
+    "Database"           = 31
+    "Multitenant"        = 32
+    "DNS"                = 35
+    "SSL"                = 36
+    "Isolation"          = 40
+    "Memory"             = 41
     "SaveImage"          = 50
     "Special"            = 60
     "Final"              = 100
@@ -506,7 +513,17 @@ $Step.Version {
 
 '@ `
         -description "What version of Business Central do you need?`nIf you are developing a Per Tenant Extension for a Business Central Saas tenant, you need a Business Central Sandbox environment" `
-        -options ([ordered]@{"LatestSandbox" = "Latest Business Central Sandbox"; "LatestOnPrem" = "Latest Business Central OnPrem"; "SpecificSandbox" = "Specific Business Central Sandbox build (requires version number)"; "SpecificOnPrem" = "Specific Business Central OnPrem build (requires version number)"}) `
+        -options ([ordered]@{
+            "LatestSandbox" = "Latest Business Central Sandbox"
+            "LatestOnPrem" = "Latest Business Central OnPrem"
+            "Next Major" = "Insider Business Central Sandbox for Next Major release (requires insider SAS token from http://aka.ms/collaborate)"
+            "Next Minor" = "InsiderBusiness Central Sandbox for Next Minor release (requires insider SAS token from http://aka.ms/collaborate)"
+            "SpecificSandbox" = "Specific Business Central Sandbox build (requires version number)"
+            "SpecificOnPrem" = "Specific Business Central OnPrem build (requires version number)"
+            "NAV2018" = "Specific NAV 2018 version"
+            "NAV2017" = "Specific NAV 2017 version"
+            "NAV2016" = "Specific NAV 2016 version"
+        }) `
         -question "Version" `
         -default "LatestSandbox" `
         -writeAnswer `
@@ -516,13 +533,76 @@ $Step.Version {
     }
 }
 
+$Step."SasToken" {
+
+    $sasToken = ""
+    if ($predef -like "Next*") {
+        $sasToken = Enter-Value `
+            -title @'
+   _____          _____   _______    _              
+  / ____|  /\    / ____| |__   __|  | |             
+ | (___   /  \  | (___      | | ___ | | _____ _ __  
+  \___ \ / /\ \  \___ \     | |/ _ \| |/ / _ \ '_ \ 
+  ____) / ____ \ ____) |    | | (_) |   <  __/ | | |
+ |_____/_/    \_\_____/     |_|\___/|_|\_\___|_| |_|
+
+'@ `
+            -description "Creating container with $predef are released for partners under NDA only.`n`nA SAS (Shared Access Signature) Token is required in order to download insider artifacts.`nA SAS Token can be found on http://aka.ms/collaborate in this document:`nhttps://partner.microsoft.com/en-us/dashboard/collaborate/packages/9387" `
+            -question "SAS Token" `
+            -previousStep `
+            -doNotConvertToLower
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
 $Step.Version2 {
 
     $fullVersionNo = $false
     $select = "Latest"
+    $storageAccount = "bcartifacts"
+    $nav = ""
     if ($predef -like "latest*") {
         $type = $predef.Substring(6)
         $version = ''
+    }
+    elseif ($predef -like "Next*") {
+        $type = "Sandbox"
+        $version = ''
+        $storageAccount = "bcinsider"
+        if ($predef -eq "Next Minor") {
+            $select = "SecondToLastMajor"
+        }
+    }
+    elseif ($predef -like "NAV*") {
+        $nav = $predef.Substring(3)
+        $type = "Onprem"
+        $ok = $false
+        do {
+            $cus = Get-NavArtifactUrl -nav $nav -country 'w1' -select All
+            $cu = Enter-Value `
+                -description "NAV $nav has $($cus.Count-1) released cumulative updates." `
+                -question "Enter CU number (0 is rtm or leave blank for latest)" `
+                -default "latest" `
+                -doNotClearHost `
+                -writeAnswer `
+                -previousStep
+            
+            if ($cu -eq "back") {
+                $ok = $true
+            }
+            else {
+                $cuno = $cus.Count-1
+                if ($cu -eq "latest" -or ([int]::TryParse($cu, [ref]$cuno) -and ($cuno -ge 0) -and ($cuno -lt $($cus.Count)))) {
+                    $ok = $true
+                    $version = $cus[$cuno].split('/')[4]
+                }
+            }
+        } while (!$ok)
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
     }
     elseif ($predef -like "specific*") {
         $type = $predef.Substring(8)
@@ -603,9 +683,21 @@ $Step.Version2 {
 
 $Step.Country {
 
+    $versionno = $version
+    if ($versionno -eq "") {
+        $versionno = (Get-BcArtifactUrl -storageAccount $storageAccount -type $type -country "w1" -sasToken $sasToken).split('/')[4]
+    }
+    $majorVersion = [int]($versionno.Split('.')[0])
+    $countries = @()
+    Get-BCArtifactUrl -storageAccount $storageAccount -type $type -version $versionno -select All -sasToken $sasToken | ForEach-Object {
+        $countries += $_.SubString($_.LastIndexOf('/')+1).Split('?')[0]
+    }
     $description = ""
     if ($version -ne "") {
         $description += "Version $version selected`n`n"
+    }
+    else {
+        $description += "Version $versionno identified`n`n"
     }
     if ($type -eq "Sandbox") {
         $default = "us"
@@ -616,14 +708,6 @@ $Step.Country {
         $description += "Please select which country version you want to use.`n`nNote: NA contains US, CA and MX."
     }
 
-    $vno = $version
-    if ($vno -eq "") {
-        $vno = (Get-BcArtifactUrl -type $type -country "w1").split('/')[4]
-    }
-    $countries = @()
-    Get-BCArtifactUrl -type $type -version $vno -select All | ForEach-Object {
-        $countries += $_.SubString($_.LastIndexOf('/')+1)
-    }
  
     $country = Enter-Value `
         -title @'
@@ -646,7 +730,7 @@ $Step.Country {
     }
 }
 
-$Step.Toolkit {
+$Step.TestToolkit {
 
     $testtoolkit = Select-Value `
         -title @'
@@ -668,6 +752,31 @@ $Step.Toolkit {
     }
 }
 
+$Step.PerformanceToolkit {
+
+    $performanceToolkit = "N"
+    if ($majorVersion -ge 17 -and $testtoolkit -ne "No") {
+        $performancetoolkit = Enter-Value `
+            -title @'
+  _____           __                                            _______          _ _    _ _   
+ |  __ \         / _|                                          |__   __|        | | |  (_) |  
+ | |__) |__ _ __| |_ ___  _ __ _ __ ___   __ _ _ __   ___ ___     | | ___   ___ | | | ___| |_ 
+ |  ___/ _ \ '__|  _/ _ \| '__| '_ ` _ \ / _` | '_ \ / __/ _ \    | |/ _ \ / _ \| | |/ / | __|
+ | |  |  __/ |  | || (_) | |  | | | | | | (_| | | | | (__  __/    | | (_) | (_) | |   <| | |_ 
+ |_|   \___|_|  |_| \___/|_|  |_| |_| |_|\__,_|_| |_|\___\___|    |_|\___/ \___/|_|_|\_\_|\__|
+
+'@ `
+            -description "The Performance Toolkit ships with Business Central 17.0.`n`nDo you need the performance toolkit to be installed?`nThe Performance Toolkit is needed in order to develop and run performance tests in the container." `
+            -options @("Y","N") `
+            -question "Please enter Y if you want to install the performance toolkit" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
 $Step.PremiumPlan {
     $assignPremiumPlan = "N"
     if ($type -eq "Sandbox") {
@@ -686,6 +795,141 @@ $Step.PremiumPlan {
             -Description "When running sandbox, you can select to assign premium plan to the users." `
             -options @("Y","N") `
             -question "Please enter Y if you want to assign premium plan" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
+$step.IncludeAL {
+    $includeAL = "N"
+    if ($majorVersion -gt 14) {
+
+        $includeAL = Enter-Value `
+            -title @'
+           _        ____                                          _____                 _                                  _   
+     /\   | |      |  _ \                     /\                 |  __ \               | |                                | |  
+    /  \  | |      | |_) | __ _ ___  ___     /  \   _ __  _ __   | |  | | _____   _____| | ___  _ __  _ __ ___   ___ _ __ | |_ 
+   / /\ \ | |      |  _ < / _` / __|/ _ \   / /\ \ | '_ \| '_ \  | |  | |/ _ \ \ / / _ \ |/ _ \| '_ \| '_ ` _ \ / _ \ '_ \| __|
+  / ____ \| |____  | |_) | (_| \__ \  __/  / ____ \| |_) | |_) | | |__| |  __/\ V /  __/ | (_) | |_) | | | | | |  __/ | | | |_ 
+ /_/    \_\______| |____/ \__,_|___/\___| /_/    \_\ .__/| .__/  |_____/ \___| \_/ \___|_|\___/| .__/|_| |_| |_|\___|_| |_|\__|
+                                                   | |   | |                                   | |                             
+                                                   |_|   |_|                                   |_|                             
+'@ `
+            -Description "If you are going to perform base app development (modify and publish the base application), you will need to use an option called -includeAL.`n`nThis option is not needed if you are going to write extensions only." `
+            -options @("Y","N") `
+            -question "Please enter Y if you need to do base app development" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
+$step.ExportAlSource {
+    $exportAlSource = "N"
+    if ($includeAL -eq "Y") {
+       $exportALSource = Enter-Value `
+            -title @'
+  ______                       _              _        ____                                        
+ |  ____|                     | |       /\   | |      |  _ \                     /\                
+ | |__  __  ___ __   ___  _ __| |_     /  \  | |      | |_) | __ _ ___  ___     /  \   _ __  _ __  
+ |  __| \ \/ / '_ \ / _ \| '__| __|   / /\ \ | |      |  _ < / _` / __|/ _ \   / /\ \ | '_ \| '_ \ 
+ | |____ >  <| |_) | (_) | |  | |_   / ____ \| |____  | |_) | (_| \__ \  __/  / ____ \| |_) | |_) |
+ |______/_/\_\ .__/ \___/|_|   \__| /_/    \_\______| |____/ \__,_|___/\___| /_/    \_\ .__/| .__/ 
+             | |                                                                      | |   | |    
+             |_|                                                                      |_|   |_|    
+'@ `
+            -Description "When specifying -includeAL, the default behavior is to export the AL source code as a project for you to modify, compile and publish.`nIf you already have a source code repository this is obviously not needed and can be avoided by specifying an option called -doNotExportObjectsToText.`n`nDo you want to export the Base App as an AL source code project?" `
+            -options @("Y","N") `
+            -question "Please enter Y if you want to export the base app AL source code" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
+$step.IncludeCSIDE {
+    $includeCSIDE = "N"
+
+    if ($majorVersion -le 14) {
+
+        if ($majorVersion -lt 14) {
+            $product = "NAV"
+        }
+        else {
+            $product = "a version of Business Central"
+        }
+        $includeCSIDE = Enter-Value `
+            -title @'
+   _____     __     _        _____                 _                                  _   
+  / ____|   / /\   | |      |  __ \               | |                                | |  
+ | |       / /  \  | |      | |  | | _____   _____| | ___  _ __  _ __ ___   ___ _ __ | |_ 
+ | |      / / /\ \ | |      | |  | |/ _ \ \ / / _ \ |/ _ \| '_ \| '_ ` _ \ / _ \ '_ \| __|
+ | |____ / / ____ \| |____  | |__| |  __/\ V /  __/ | (_) | |_) | | | | | |  __/ | | | |_ 
+  \_____/_/_/    \_\______| |_____/ \___| \_/ \___|_|\___/| .__/|_| |_| |_|\___|_| |_|\__|
+                                                          | |                             
+                                                          |_|                             
+'@ `
+            -Description "You are running $product, which includes the legacy Windows Client and legacy C/AL development.`nIf you are going to use the Windows Client or use C/AL development, you will need to use an option called -includeCSIDE." `
+            -options @("Y","N") `
+            -question "Please enter Y if you need CSIDE or Windows Client" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
+$step.ExportCAlSource {
+    $exportCAlSource = "N"
+    if ($includeCSIDE -eq "Y") {
+       $exportCAlSource = Enter-Value `
+            -title @'
+  ______                       _      _____     __     _        ____                                        
+ |  ____|                     | |    / ____|   / /\   | |      |  _ \                     /\                
+ | |__  __  ___ __   ___  _ __| |_  | |       / /  \  | |      | |_) | __ _ ___  ___     /  \   _ __  _ __  
+ |  __| \ \/ / '_ \ / _ \| '__| __| | |      / / /\ \ | |      |  _ < / _` / __|/ _ \   / /\ \ | '_ \| '_ \ 
+ | |____ >  <| |_) | (_) | |  | |_  | |____ / / ____ \| |____  | |_) | (_| \__ \  __/  / ____ \| |_) | |_) |
+ |______/_/\_\ .__/ \___/|_|   \__|  \_____/_/_/    \_\______| |____/ \__,_|___/\___| /_/    \_\ .__/| .__/ 
+             | |                                                                               | |   | |    
+             |_|                                                                               |_|   |_|    
+'@ `
+            -Description "When specifying -includeCSIDE, the default behavior is to export the C/AL source code as text files.`nIf you already have a source code repository this is obviously not needed and can be avoided by specifying an option called -doNotExportObjectsToText.`n`nDo you want to export the C/AL base app as text files?" `
+            -options @("Y","N") `
+            -question "Please enter Y if you want to export the C/AL base app as text files" `
+            -default "N" `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+    }
+}
+
+$Step.Vsix {
+
+    $vsix = "N"
+    if ($majorVersion -gt 14) {
+        $vsix = Enter-Value `
+            -title @'
+           _        _                                                ______      _                 _             
+     /\   | |      | |                                              |  ____|    | |               (_)            
+    /  \  | |      | |     __ _ _ __   __ _ _   _  __ _  __ _  ___  | |__  __  __ |_ ___ _ __  ___ _  ___  _ __  
+   / /\ \ | |      | |    / _` | '_ \ / _` | | | |/ _` |/ _` |/ _ \ |  __| \ \/ / __/ _ \ '_ \/ __| |/ _ \| '_ \ 
+  / ____ \| |____  | |____ (_| | | | | (_| | |_| | (_| | (_| |  __/ | |____ >  <| |_  __/ | | \__ \ | (_) | | | |
+ /_/    \_\______| |______\__,_|_| |_|\__, |\__,_|\__,_|\__, |\___| |______/_/\_\\__\___|_| |_|___/_|\___/|_| |_|
+                                       __/ |             __/ |                                                   
+                                      |___/             |___/                                                    
+'@ `
+            -description "The AL language extension used in the container is normally the vsix file that comes with the version of Business Central selected.`n`nYou can select to use the latest shipped AL Language extension from the marketplace by specifying -vsixFile <url>." `
+            -options @("Y","N") `
+            -question "Please enter Y if you want to use the latest AL Language extension from the marketplace" `
             -default "N" `
             -previousStep
         if ($script:wizardStep -eq $script:thisStep+1) {
@@ -721,7 +965,7 @@ $Step.CreateTestUsers {
 
 $Step.License {
 
-    $licenserequired = ($testtoolkit -ne "No" -or $createTestUsers -eq "Y")
+    $licenserequired = ($testtoolkit -ne "No" -or $createTestUsers -eq "Y" -or $exportCAlSource -eq "Y" -or $exportAlSource -eq "Y")
     if ($licenserequired) {
         $description = "Please specify a license file url.`nDue to other selections, you need to specify a license file."
         $default = ""
@@ -750,7 +994,8 @@ $Step.License {
         -description $description `
         -question "License File" `
         -default $default `
-        -previousStep
+        -previousStep `
+        -doNotConvertToLower
     if ($script:wizardStep -eq $script:thisStep+1) {
         $script:prevSteps.Push($script:thisStep)
     }
@@ -837,6 +1082,42 @@ $Step.Database {
             $databaseName = $databaseName.TrimStart('[').TrimEnd(']')
         }
     }
+}
+
+$step.Multitenant {
+    $multitenant = ""
+    if ($database -ne "Connect") {
+        if ($type -eq "Sandbox") {
+            $description = "You are running a sandbox container, which by default is multitenant.`nBy specifying -multitenant:`$false, you can switch the container to single tenancy."
+            $default = "Y"
+        }
+        else {
+            $description = "You are running an onprem container, which by default is singletenant.`nBy specifying -multitenant, you can switch the container to multitenant."
+            $default = "N"
+        }
+        $multitenant = Enter-Value `
+            -title @'
+  __  __       _ _   _ _                         _   
+ |  \/  |     | | | (_) |                       | |  
+ | \  / |_   _| | |_ _| |_ ___ _ __   __ _ _ __ | |_ 
+ | |\/| | | | | | __| | __/ _ \ '_ \ / _` | '_ \| __|
+ | |  | | |_| | | |_| | |_  __/ | | | (_| | | | | |_ 
+ |_|  |_|\__,_|_|\__|_|\__\___|_| |_|\__,_|_| |_|\__|
+
+'@ `
+            -description $description `
+            -options @("Y","N") `
+            -question "Please select Y if you want a multitenant container" `
+            -default $default `
+            -previousStep
+        if ($script:wizardStep -eq $script:thisStep+1) {
+            $script:prevSteps.Push($script:thisStep)
+        }
+
+        if ($multitenant -eq $default) {
+            $multitenant = ""
+        }
+    }    
 }
 
 $Step.DNS {
@@ -957,14 +1238,9 @@ $Step.Isolation {
 $Step.Memory {
     if ($hosting -eq "Local") {
 
-        if ($version -ne "") {
-            $majorVersion = [int]($version.Split('.')[0])
-        }
-    
-    
         $demo = 4
         $development = 8
-        if ($version -eq "" -or $majorVersion -ge 16) {
+        if ($majorVersion -ge 16) {
             $newBaseApp = 16
         }
         elseif ($majorVersion -eq 15) {
@@ -1028,41 +1304,6 @@ $Step.Memory {
     }
 }
 
-$step.IncludeCSIDE {
-    $includeCSIDE = "N"
-    if ($version -ne "") {
-        $majorVersion = [int]($version.Split('.')[0])
-        if ($majorVersion -le 14) {
-
-            if ($majorVersion -lt 14) {
-                $product = "NAV"
-            }
-            else {
-                $product = "Business Central"
-            }
-            $includeCSIDE = Enter-Value `
-                -title @'
-   _____     __     _        _____                 _                                  _   
-  / ____|   / /\   | |      |  __ \               | |                                | |  
- | |       / /  \  | |      | |  | | _____   _____| | ___  _ __  _ __ ___   ___ _ __ | |_ 
- | |      / / /\ \ | |      | |  | |/ _ \ \ / / _ \ |/ _ \| '_ \| '_ ` _ \ / _ \ '_ \| __|
- | |____ / / ____ \| |____  | |__| |  __/\ V /  __/ | (_) | |_) | | | | | |  __/ | | | |_ 
-  \_____/_/_/    \_\______| |_____/ \___| \_/ \___|_|\___/| .__/|_| |_| |_|\___|_| |_|\__|
-                                                          | |                             
-                                                          |_|                             
-'@ `
-                -Description "You are running a version of $product, which includes the legacy Windows Client and legacy C/AL development.`nIf you are going to use the Windows Client or C/AL development, you will need to use an option called -includeCSIDE." `
-                -options @("Y","N") `
-                -question "Please enter Y if you need CSIDE or Windows Client" `
-                -default "N" `
-                -previousStep
-            if ($script:wizardStep -eq $script:thisStep+1) {
-                $script:prevSteps.Push($script:thisStep)
-            }
-        }
-    }
-}
-
 $Step.SaveImage  {
     if ($hosting -eq "Local") {
         $imageName = Enter-Value `
@@ -1088,14 +1329,10 @@ $Step.SaveImage  {
 
 $Step.Special {
     if ($hosting -eq "Local") {
-    
-        # TODO: SSL / .pdx+password
-    
-        # TODO: Vsix
-    
+
         # TODO: Publish ports
     
-        # TODO: Options like CheckHealth, Restart, Locale, TimeZoneId, Timeout, Multitenant
+        # TODO: Options like CheckHealth, Restart, Locale, TimeZoneId, Timeout
     
     }
    
@@ -1138,8 +1375,27 @@ $step.Final {
     
         $script += "`$auth = '$auth'"
         $parameters += "-auth `$auth"
-    
-        $script += "`$artifactUrl = Get-BcArtifactUrl -type '$type' -version '$version' -country '$country' -select '$select'"
+
+        if ($nav) {
+            if ($cu -eq "latest") {
+                $script += "`$artifactUrl = Get-NavArtifactUrl -nav '$nav' -country '$country'"
+            }
+            else {
+                $script += "`$artifactUrl = Get-NavArtifactUrl -nav '$nav' -cu '$cu' -country '$country'"
+            }
+        }
+        elseif ($predef -like "Next*") {
+            $script += "`$sasToken = '$sasToken'"
+            $script += "`$artifactUrl = Get-BcArtifactUrl -storageAccount '$storageAccount' -type '$type' -country '$country' -select '$select' -sasToken `$sasToken"
+        }
+        else {
+            if ($version) {
+                $script += "`$artifactUrl = Get-BcArtifactUrl -type '$type' -version '$version' -country '$country' -select '$select'"
+            }
+            else {
+                $script += "`$artifactUrl = Get-BcArtifactUrl -type '$type' -country '$country' -select '$select'"
+            }
+        }
         $parameters += "-artifactUrl `$artifactUrl"
     
         if ($imageName -ne "blank") {
@@ -1161,6 +1417,13 @@ $step.Final {
             $parameters += "-databaseServer `$databaseServer -databaseInstance `$databaseInstance -databaseName `$databaseName"
             $parameters += "-databaseCredential `$databaseCredential"
         }
+
+        if ($multitenant -eq "Y") {
+            $parameters += "-multitenant"
+        }
+        elseif ($multitenant -eq "N") {
+            $parameters += "-multitenant:`$false"
+        }
     
         if ($testtoolkit -ne "No") {
             $parameters += "-includeTestToolkit"
@@ -1169,6 +1432,9 @@ $step.Final {
             }
             elseif ($testtoolkit -eq "Libraries") {
                 $parameters += "-includeTestLibrariesOnly"
+            }
+            if ($performanceToolkit -eq "Y") {
+                $parameters += "-includePerformanceToolkit"
             }
         }
     
@@ -1201,8 +1467,24 @@ $step.Final {
         if ($memoryLimit) {
             $parameters += "-memoryLimit $memoryLimit"
         }
+        if ($includeAL -eq "Y") {
+            if ($exportAlSource -eq "Y") {
+                $parameters += "-includeAL"
+            }
+            else {
+                $parameters += "-includeAL -doNotExportObjectsToText"
+            }
+        }
         if ($includeCSIDE -eq "Y") {
-            $parameters += "-includeCSIDE"
+            if ($exportCAlSource -eq "Y") {
+                $parameters += "-includeCSIDE"
+            }
+            else {
+                $parameters += "-includeCSIDE -doNotExportObjectsToText"
+            }
+        }
+        if ($vsix -eq "Y") {
+            $parameters += "-vsixFile (Get-LatestAlLanguageExtensionUrl)"
         }
     
         $script += "New-BcContainer ``"

@@ -45,7 +45,7 @@ function DockerDo {
     Param(
         [Parameter(Mandatory=$true)]
         [string]$imageName,
-        [ValidateSet('run','start','pull','restart','stop')]
+        [ValidateSet('run','start','pull','restart','stop', 'rmi')]
         [string]$command = "run",
         [switch]$accept_eula,
         [switch]$accept_outdated,
@@ -220,7 +220,7 @@ function TestSasToken {
             if ([DateTime]::Now -gt [DateTime]$se) {
                 Write-Host "ERROR: The sas token provided expired on $(([DateTime]$se).ToString())"
             }
-            elseif ([DateTime]::Now.AddDays(7) -gt [DateTime]$se) {
+            elseif ([DateTime]::Now.AddDays(14) -gt [DateTime]$se) {
                 $span = ([DateTime]$se).Subtract([DateTime]::Now)
                 Write-Host "WARNING: The sas token provided will expire on $(([DateTime]$se).ToString())"
             }
@@ -257,3 +257,47 @@ function Expand-7zipArchive {
         Expand-Archive -Path $Path -DestinationPath "$DestinationPath" -Force
     }
 }
+
+function GetTestToolkitApps {
+    Param(
+        [string] $containerName,
+        [switch] $includeTestLibrariesOnly,
+        [switch] $includeTestFrameworkOnly,
+        [switch] $includePerformanceToolkit
+    )
+
+    Invoke-ScriptInBCContainer -containerName $containerName -scriptblock { Param($includeTestLibrariesOnly, $includeTestFrameworkOnly, $includePerformanceToolkit)
+    
+        # Add Test Framework
+        $apps = @(get-childitem -Path "C:\Applications\TestFramework\TestLibraries\*.*" -recurse -filter "*.app")
+        $apps += @(get-childitem -Path "C:\Applications\TestFramework\TestRunner\*.*" -recurse -filter "*.app")
+    
+
+        if (!$includeTestFrameworkOnly) {
+            
+            # Add Test Libraries
+            $apps += "Microsoft_System Application Test Library.app", "Microsoft_Tests-TestLibraries.app" | % {
+                @(get-childitem -Path "C:\Applications\*.*" -recurse -filter $_)
+            }
+
+            if (!$includeTestLibrariesOnly) {
+
+                # Add Tests
+                $apps += @(get-childitem -Path "C:\Applications\*.*" -recurse -filter "Microsoft_Tests-*.app") | Where-Object { $_ -notlike "*\Microsoft_Tests-TestLibraries.app" -and $_ -notlike "*\Microsoft_Tests-Marketing.app" -and $_ -notlike "*\Microsoft_Tests-SINGLESERVER.app" }
+            }
+        }
+
+        if ($includePerformanceToolkit) {
+            $apps += @(get-childitem -Path "C:\Applications\TestFramework\PerformanceToolkit\*.*" -recurse -filter "*.app")
+        }
+
+        $apps | % {
+            $appFile = Get-ChildItem -path "c:\applications.*\*.*" -recurse -filter ($_.Name).Replace(".app","_*.app")
+            if (!($appFile)) {
+                $appFile = $_
+            }
+            $appFile
+        }
+    } -argumentList $includeTestLibrariesOnly, $includeTestFrameworkOnly, $includePerformanceToolkit
+}
+

@@ -1,59 +1,42 @@
 ﻿<# 
  .Synopsis
-  Sort an array of app folders
+  Sort an array of app files
  .Description
-  Sort an array of app folders with dependencies first, for compile and publish order
- .Parameter appFolders
-  Array of folders including an app.json
- .Parameter baseFolder
-  If specified, all appFolders in the array are subFolders to this folder.
+  Sort an array of app files with dependencies first, for compile and publish order
+ .Parameter appFiles
+  Array of app files
  .Parameter unknownDependencies
   If specified, this reference parameter will contain unresolved dependencies after sorting
  .Example
-  $folders = Sort-AppFoldersByDependencies -appFolders @($folder1, $folder2)
+  $files = Sort-AppFilesByDependencies -appFiles @($app1, $app2)
 #>
-function Sort-AppFoldersByDependencies {
+function Sort-AppFilesByDependencies {
     Param(
         [Parameter(Mandatory=$true)]
-        [string[]] $appFolders,
-        [Parameter(Mandatory=$false)]
-        [string] $baseFolder = "",
+        [string[]] $appFiles,
         [Parameter(Mandatory=$false)]
         [ref] $unknownDependencies
     )
 
-    if ($baseFolder) {
-        $baseFolder = $baseFolder.TrimEnd('\')+'\'
-    }
-
     # Read all app.json objects, populate $apps
     $apps = $()
-    $folders = @{}
-    $appFolders | ForEach-Object {
-        $appFolder = "$baseFolder$_"
-        $appJsonFile = Join-Path $appFolder "app.json"
-        if (-not (Test-Path -Path $appJsonFile)) {
-            Write-Warning "$appFolder doesn't contain app.json"
-        }
-        else {
+    $files = @{}
+    $appFiles | ForEach-Object {
+        $appFile = $_
+        $tmpFolder = Join-Path $env:TEMP ([Guid]::NewGuid().ToString())
+        try {
+            Extract-AppFileToFolder -appFilename $appFile -appFolder $tmpFolder -generateAppJson 6> $null
+            $appJsonFile = Join-Path $tmpFolder "app.json"
             $appJson = Get-Content -Path $appJsonFile | ConvertFrom-Json
-            
-            # replace id with appid
-            if ($appJson.psobject.Members | Where-Object name -eq "dependencies") {
-                if ($appJson.dependencies) {
-                    $appJson.dependencies = $appJson.dependencies | % {
-                        if ($_.psobject.Members | where-object membertype -like 'noteproperty' | Where-Object name -eq "id") {
-                            New-Object psobject -Property ([ordered]@{ "appId" = $_.id; "publisher" = $_.publisher; "name" = $_.name; "version" = $_.version })
-                        }
-                        else {
-                            $_
-                        }
-                    }
-                }
-            }
-
-            $folders += @{ "$($appJson.Id)" = $appFolder }
+                
+            $files += @{ "$($appJson.Id)" = $appFile }
             $apps += @($appJson)
+        }
+        catch {
+            throw "Unable to extract and analyze appFile $appFile - might be a runtime package"
+        }
+        finally {
+            Remove-Item $tmpFolder -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
     
@@ -97,7 +80,7 @@ function Sort-AppFoldersByDependencies {
     $apps | ForEach-Object { AddAnApp -AnApp $_ }
 
     $script:sortedApps | ForEach-Object {
-        ($folders[$_.id]).SubString($baseFolder.Length)
+        $files[$_.id]
     }
     if ($unknownDependencies) {
         $unknownDependencies.value = @($script:unresolvedDependencies | ForEach-Object { if ($_) { 
@@ -105,4 +88,4 @@ function Sort-AppFoldersByDependencies {
 		} })
     }
 }
-Export-ModuleMember -Function Sort-AppFoldersByDependencies
+Export-ModuleMember -Function Sort-AppFilesByDependencies

@@ -31,9 +31,9 @@
  .Parameter usePublicWebBaseUrl
   Connect to the public Url and not to localhost
  .Example
-  Get-TestsFromBcContainer -contatinerName test -credential $credential
+  Get-TestsFromBcContainer -containerName test -credential $credential
  .Example
-  Get-TestsFromBcContainer -contatinerName $containername -credential $credential -TestSuite "MYTESTS" -TestCodeunit "134001"
+  Get-TestsFromBcContainer -containerName $containername -credential $credential -TestSuite "MYTESTS" -TestCodeunit "134001"
 #>
 function Get-TestsFromBcContainer {
     Param (
@@ -76,7 +76,7 @@ function Get-TestsFromBcContainer {
         }
     }
 
-    $PsTestToolFolder = Join-Path $extensionsFolder "$containerName\PsTestTool-6"
+    $PsTestToolFolder = Join-Path $extensionsFolder "$containerName\PsTestTool"
     $PsTestFunctionsPath = Join-Path $PsTestToolFolder "PsTestFunctions.ps1"
     $ClientContextPath = Join-Path $PsTestToolFolder "ClientContext.ps1"
     $fobfile = Join-Path $PsTestToolFolder "PSTestToolPage.fob"
@@ -218,7 +218,8 @@ function Get-TestsFromBcContainer {
                       -DisabledTests $disabledtests `
                       -testPage $testPage `
                       -debugMode:$debugMode `
-                      -ignoreGroups:$ignoreGroups
+                      -ignoreGroups:$ignoreGroups `
+                      -connectFromHost:$connectFromHost
 
         }
         catch {

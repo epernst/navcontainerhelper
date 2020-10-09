@@ -70,6 +70,8 @@
   Avoid exporting objects for baseline from the container (Saves time, but you will not be able to use the object handling functions without the baseline)
  .Parameter alwaysPull
   Always pull latest version of the docker image
+ .Parameter forceRebuild
+  Force a rebuild of the cached image even if the generic image or os hasn't changed
  .Parameter useBestContainerOS
   Use the best Container OS based on the Host OS. If the OS doesn't match, a better public generic image is selected.
  .Parameter useGenericImage
@@ -78,6 +80,10 @@
   Assign Premium plan to admin user
  .Parameter multitenant
   Setup container for multitenancy by adding this switch
+ .Parameter addFontsFromPath
+  Enumerate all fonts from this path and install them in the container
+ .Parameter featureKeys
+  Optional hashtable of featureKeys, which can be applied to the container database
  .Parameter clickonce
   Specify the clickonce switch if you want to have a clickonce version of the Windows Client created
  .Parameter includeTestToolkit
@@ -86,6 +92,8 @@
   Specify this parameter to avoid including the standard tests when adding includeTestToolkit
  .Parameter includeTestFrameworkOnly
   Only import TestFramework (do not import Test Codeunits nor TestLibraries)
+ .Parameter includePerformanceToolkit
+  Include the performance toolkit app (only 17.x and later)
  .Parameter restart
   Define the restart option for the container
  .Parameter auth
@@ -195,14 +203,18 @@ function New-BcContainer {
         [switch] $enableTaskScheduler,
         [switch] $doNotExportObjectsToText,
         [switch] $alwaysPull,
+        [switch] $forceRebuild,
         [switch] $useBestContainerOS,
         [string] $useGenericImage,
         [switch] $assignPremiumPlan,
         [switch] $multitenant,
+        [string] $addFontsFromPath = "",
+        [hashtable] $featureKeys = $null,
         [switch] $clickonce,
         [switch] $includeTestToolkit,
         [switch] $includeTestLibrariesOnly,
         [switch] $includeTestFrameworkOnly,
+        [switch] $includePerformanceToolkit,
         [ValidateSet('no','on-failure','unless-stopped','always')]
         [string] $restart='unless-stopped',
         [ValidateSet('Windows','NavUserPassword','UserPassword','AAD')]
@@ -233,10 +245,27 @@ function New-BcContainer {
         [scriptblock] $finalizeDatabasesScriptBlock
     )
 
-    (Get-ContainerHelperConfig).defaultNewContainerParameters.GetEnumerator() | % {
-        if (!($PSBoundParameters.ContainsKey($_.Name))) {
-            Write-Host "Default parameter $($_.Name) = $($_.Value)"
-            Set-Variable -name $_.Name -Value $_.Value
+    $defaultNewContainerParameters = (Get-ContainerHelperConfig).defaultNewContainerParameters
+    if ($defaultNewContainerParameters -is [HashTable]) {
+        $defaultNewContainerParameters.GetEnumerator() | ForEach-Object {
+            if (!($PSBoundParameters.ContainsKey($_.Name))) {
+                Write-Host "Default parameter $($_.Name) = $($_.Value)"
+                Set-Variable -name $_.Name -Value $_.Value
+            }        
+        }
+    }
+    elseif ($defaultNewContainerParameters -is [PSCustomObject]) {
+        $defaultNewContainerParameters.PSObject.Properties | ForEach-Object {
+            if (!($PSBoundParameters.ContainsKey($_.Name))) {
+                if ($_.Name -eq "Credential") {
+                    Write-Host "Default parameter $($_.Name)"
+                    Set-Variable -Name $_.Name -Value (New-Object pscredential -ArgumentList $_.Value.Username, ($_.Value.Password | ConvertTo-SecureString))
+                }
+                else {
+                    Write-Host "Default parameter $($_.Name) = $($_.Value)"
+                    Set-Variable -name $_.Name -Value $_.Value
+                }
+            }
         }        
     }
 
@@ -245,9 +274,20 @@ function New-BcContainer {
     }
 
     Check-BcContainerName -ContainerName $containerName
+    $imageName = $imageName.ToLowerInvariant()
 
-    if ($imageName.StartsWith('microsoft/dynamics-nav','InvariantCultureIgnoreCase')) {
-        Write-Host 'WARNING: using old docker hub name for NAV image. Replacing with mcr.microsoft.com/dynamicsnav'
+    if (!$useSSL) {
+        try {
+            $hsts = (New-Object System.Net.WebClient).DownloadString('https://hstspreload.com/api/v1/status/$containerName') | ConvertFrom-Json
+            if (($hsts.chrome) -or ($hsts.firefox) -or ($hsts.tor)) {
+                Write-Host -ForegroundColor Red "WARNING: '$containername' is in the HSTS preload list. You cannot use the container unless you use SSL and a trusted certificate.`nAdd -useSSL and -installCertificateOnHost to use a self signed certificate and install it in trusted root certifications on the host."
+            }
+        }
+        catch {}
+    }
+
+    if ($imageName.StartsWith('microsoft/dynamics-nav')) {
+        Write-Host -ForegroundColor Yellow "WARNING: using old docker hub name for NAV image. Replacing with mcr.microsoft.com/dynamicsnav"
         $imageName = "mcr.microsoft.com/dynamicsnav$($imageName.Substring('microsoft/dynamics-nav'.Length))"
     }
 
@@ -359,7 +399,7 @@ function New-BcContainer {
 
     $myClientVersion = [System.Version]"0.0.0"
     if (!(([System.Version]::TryParse($dockerClientVersion, [ref]$myClientVersion)) -and ($myClientVersion -ge ([System.Version]"18.03.0")))) {
-        Write-Host -ForegroundColor Red "WARNING: Microsoft container registries will switch to TLS v1.2 very soon and your version of Docker does not support this. You should install a new version of docker asap (version 18.03.0 or later)"
+        Write-Host -ForegroundColor Yellow "WARNING: Microsoft container registries will switch to TLS v1.2 very soon and your version of Docker does not support this. You should install a new version of docker asap (version 18.03.0 or later)"
     }
 
     Write-Host "Docker Server Version is $dockerServerVersion"
@@ -376,17 +416,32 @@ function New-BcContainer {
     if ($artifactUrl) {
         # When using artifacts, you always use best container os - no need to replatform
         $useBestContainerOS = $false
+
+        $artifactPaths = Download-Artifacts -artifactUrl $artifactUrl -includePlatform -forceRedirection:$alwaysPull
+        $appArtifactPath = $artifactPaths[0]
+        $platformArtifactPath = $artifactPaths[1]
+
+        $appManifestPath = Join-Path $appArtifactPath "manifest.json"
+        $appManifest = Get-Content $appManifestPath | ConvertFrom-Json
+
+        $bcstyle = "onprem"
+        if ($appManifest.PSObject.Properties.name -eq "isBcSandbox") {
+            if ($appManifest.isBcSandbox) {
+                $bcstyle = "sandbox"
+                if (!($PSBoundParameters.ContainsKey('multitenant')) -and !$skipDatabase) {
+                    $multitenant = $bcContainerHelperConfig.sandboxContainersAreMultitenantByDefault
+                }
+            }
+        }
+
     }
 
-    if ($imageName -eq "") {
-        Write-Host "Fetching all docker images"
-        $allImages = @(docker images --format "{{.Repository}}:{{.Tag}}")
-    }
-    else {
+    Write-Host "Fetching all docker images"
+    $allImages = @(docker images --format "{{.Repository}}:{{.Tag}}")
+
+    if ($imageName -ne "") {
+
         if ($artifactUrl -eq "") {
-
-            Write-Host "Fetching all docker images"
-            $allImages = @(docker images --format "{{.Repository}}:{{.Tag}}")
 
             if ($imageName -like "mcr.microsoft.com/*") {
                 Write-Host -ForegroundColor Red "WARNING: You are running specific Docker images from mcr.microsoft.com. These images will no longer be updated, you should switch to user Docker artifacts. See https://freddysblog.com/2020/07/05/july-updates-are-out-they-are-the-last-on-premises-docker-images/"
@@ -396,148 +451,45 @@ function New-BcContainer {
             }
         }
         else {
-            $autotag = $false
             Write-Host "ArtifactUrl and ImageName specified"
-            if (!$imageName.Contains(':')) {
-                $appUri = [Uri]::new($artifactUrl)
-                $imageName += ":$($appUri.AbsolutePath.Replace('/','-').TrimStart('-'))"
-                $autotag = $true
+
+            $mtImage = $multitenant
+            if ($useNewDatabase -or $useCleanDatabase) {
+                $mtImage = $false
             }
 
-            $buildMutexName = "img-$imageName"
-            $buildMutex = New-Object System.Threading.Mutex($false, $buildMutexName)
-            try {
-                try {
-                    if (!$buildMutex.WaitOne(1000)) {
-                        Write-Host "Waiting for other process building image $imageName"
-                        $buildMutex.WaitOne() | Out-Null
-                        Write-Host "Other process completed download"
-                    }
-                }
-                catch [System.Threading.AbandonedMutexException] {
-                   Write-Host "Other process terminated abnormally"
-                }
-    
-                Write-Host "Fetching all docker images"
-                $allImages = @(docker images --format "{{.Repository}}:{{.Tag}}")
+            $imageName = New-Bcimage `
+                -artifactUrl $artifactUrl `
+                -imageName $imagename `
+                -isolation $isolation `
+                -baseImage $useGenericImage `
+                -memory $memoryLimit `
+                -skipDatabase:$skipDatabase `
+                -multitenant:$mtImage `
+                -addFontsFromPath $addFontsFromPath `
+                -licenseFile $licensefile `
+                -includeTestToolkit:$includeTestToolkit `
+                -includeTestFrameworkOnly:$includeTestFrameworkOnly `
+                -includeTestLibrariesOnly:$includeTestLibrariesOnly `
+                -includePerformanceToolkit:$includePerformanceToolkit `
+                -skipIfImageAlreadyExists:(!$forceRebuild) `
+                -allImages $allImages
 
-                $appArtifactPath = Download-Artifacts -artifactUrl $artifactUrl -forceRedirection:$alwaysPull
-                $appManifestPath = Join-Path $appArtifactPath "manifest.json"
-                $appManifest = Get-Content $appManifestPath | ConvertFrom-Json
-
-                if ($appManifest.PSObject.Properties.name -eq "isBcSandbox") {
-                    if ($appManifest.isBcSandbox) {
-                        if (!($PSBoundParameters.ContainsKey('multitenant')) -and !$skipDatabase) {
-                            $multitenant = $bcContainerHelperConfig.sandboxContainersAreMultitenantByDefault
-                        }
-                    }
-                }
-                $mtImage = $multitenant
-                if ($useNewDatabase -or $useCleanDatabase) {
-                    $mtImage = $false
-                }
-
-                $dbstr = ""
-                if ($skipDatabase) {
-                    if ($autotag) { $imageName += "-nodb" }
-                    $dbstr = " without database"
-                }
-                $mtstr = ""
-                if ($mtImage) {
-                    if ($autotag) { $imageName += "-mt" }
-                    $mtstr = " multitenant"
-                }
-
-                $rebuild = $false
-                if ($allImages | Where-Object { $_ -eq $imageName }) {
-                    try {
-                        Write-Host "Image $imageName already exists"
-                        $inspect = docker inspect $imageName | ConvertFrom-Json
-            
-                        if ($useGenericImage -eq "") {
-                            $useGenericImage = Get-BestGenericImageName
-                        }
-            
-                        $labels = Get-BcContainerImageLabels -imageName $useGenericImage
-            
-                        $imageArtifactUrl = ($inspect.config.env | ? { $_ -like "artifactUrl=*" }).SubString(12).Split('?')[0]
-                        if ($imageArtifactUrl -ne $artifactUrl.Split('?')[0]) {
-                            Write-Host "Image $imageName was build with artifactUrl $imageArtifactUrl, should be $($artifactUrl.Split('?')[0])"
-                            $rebuild = $true
-                        }
-                        if ($inspect.Config.Labels.version -ne $appManifest.Version) {
-                            Write-Host "Image $imageName was build with version $($inspect.Config.Labels.version), should be $($appManifest.Version)"
-                            $rebuild = $true
-                        }
-                        elseif ($inspect.Config.Labels.Country -ne $appManifest.Country) {
-                            Write-Host "Image $imageName was build with version $($inspect.Config.Labels.version), should be $($appManifest.Version)"
-                            $rebuild = $true
-                        }
-                        elseif ($inspect.Config.Labels.osversion -ne $labels.osversion) {
-                            Write-Host "Image $imageName was build for OS Version $($inspect.Config.Labels.osversion), should be $($labels.osversion)"
-                            $rebuild = $true
-                        }
-                        elseif ($inspect.Config.Labels.tag -ne $labels.tag) {
-                            Write-Host "Image $imageName has generic Tag $($inspect.Config.Labels.tag), should be $($labels.tag)"
-                            $rebuild = $true
-                        }
-                       
-                        if (($inspect.Config.Labels.PSObject.Properties.Name -eq "Multitenant") -and ($inspect.Config.Labels.Multitenant -eq "Y")) {
-                            if (!$mtImage) {
-                                Write-Host "Image $imageName was build multi tenant, should have been single tenant"
-                                $rebuild = $true
-                            }
-                        }
-                        else {
-                            if ($mtImage) {
-                                Write-Host "Image $imageName was build single tenant, should have been multi tenant"
-                                $rebuild = $true
-                            }
-                        }
-             
-                        if (($inspect.Config.Labels.PSObject.Properties.Name -eq "SkipDatabase") -and ($inspect.Config.Labels.SkipDatabase -eq "Y")) {
-                            if (!$skipdatabase) {
-                                Write-Host "Image $imageName was build without a database, should have a database"
-                                $rebuild = $true
-                            }
-                        }
-                        else {
-                            # Do not rebuild if database is there, just don't use it
-                        }
-                    }
-                    catch {
-                        $rebuild = $true
-                    }
-                }
-                else {
-                    Write-Host "Image $imageName doesn't exist"
-                    $rebuild = $true
-                }
-                if ($rebuild) {
-                    Write-Host "Building$mtstr image $imageName based on $($artifactUrl.Split('?')[0])$dbstr"
-                    $startTime = [DateTime]::Now
-                    New-Bcimage -artifactUrl $artifactUrl -imageName $imagename -isolation $isolation -baseImage $useGenericImage -memory $memoryLimit -skipDatabase:$skipDatabase -multitenant:$mtImage
-                    $timespend = [Math]::Round([DateTime]::Now.Subtract($startTime).Totalseconds)
-                    Write-Host "Building image took $timespend seconds"
-                    if (-not ($allImages | Where-Object { $_ -eq $imageName })) {
-                        $allImages += $imageName
-                    }
-                }
-                $artifactUrl = ""
-                $alwaysPull = $false
-                $useGenericImage = ""
-                $doNotGetBestImageName = $true
+            if (-not ($allImages | Where-Object { $_ -eq $imageName })) {
+                $allImages += $imageName
             }
-            finally {
-                $buildMutex.ReleaseMutex()
-            }
+
+            $artifactUrl = ""
+            $alwaysPull = $false
+            $useGenericImage = ""
+            $doNotGetBestImageName = $true
         }
     }
 
     if (!($PSBoundParameters.ContainsKey('useTraefik'))) {
         $traefikForBcBasePath = "c:\programdata\bccontainerhelper\traefikforbc"
         if (Test-Path -Path (Join-Path $traefikForBcBasePath "traefik.txt") -PathType Leaf) {
-            Write-Host "WARNING: useTraefik not specified, but Traefik container was initialized, using Traefik. Specify -useTraefik:`$false if you do NOT want to use Traefik."
+            Write-Host -ForegroundColor Yellow "WARNING: useTraefik not specified, but Traefik container was initialized, using Traefik. Specify -useTraefik:`$false if you do NOT want to use Traefik."
             $useTraefik = $true
         }
     }
@@ -651,7 +603,7 @@ function New-BcContainer {
             $imageName = $bestImageName
             if ($artifactUrl) {
                 $genericTagVersion = [Version](Get-BcContainerGenericTag -containerOrImageName $imageName)
-                if ($genericTagVersion -lt [Version]"0.1.0.5") {
+                if ($genericTagVersion -lt [Version]"0.1.0.16") {
                     Write-Host "Generic image is version $genericTagVersion - pulling a newer image"
                     $pullit = $true
                 }
@@ -1050,17 +1002,17 @@ function New-BcContainer {
                 }
                 else {
                     $isolation = "process"
-                    Write-Host "WARNING: Host OS and Base Image Container OS doesn't match and Hyper-V is not installed. If you encounter issues, you could try to install Hyper-V."
+                    Write-Host -ForegroundColor Yellow "WARNING: Host OS and Base Image Container OS doesn't match and Hyper-V is not installed. If you encounter issues, you could try to install Hyper-V."
                 }
             }
             else {
                 $isolation = "hyperv"
-                Write-Host "WARNING: Host OS and Base Image Container OS doesn't match, defaulting to hyperv. If you do not have Hyper-V installed or you encounter issues, you could try to specify -isolation process"
+                Write-Host -ForegroundColor Yellow "WARNING: Host OS and Base Image Container OS doesn't match, defaulting to hyperv. If you do not have Hyper-V installed or you encounter issues, you could try to specify -isolation process"
             }
 
         }
         elseif ($isolation -eq "process") {
-            Write-Host "WARNING: Host OS and Base Image Container OS doesn't match and process isolation is specified. If you encounter issues, you could try to specify -isolation hyperv"
+            Write-Host -ForegroundColor Yellow "WARNING: Host OS and Base Image Container OS doesn't match and process isolation is specified. If you encounter issues, you could try to specify -isolation hyperv"
         }
     }
     Write-Host "Using $isolation isolation"
@@ -1374,7 +1326,7 @@ if (!(Test-Path "c:\navpfiles\*")) {
     . "c:\run\setupWebClient.ps1"
 }
 catch {
-    Write-Host "WARNING: SetupWebClient failed, retrying in 10 seconds"
+    Write-Host -ForegroundColor Yellow "WARNING: SetupWebClient failed, retrying in 10 seconds"
     Start-Sleep -seconds 10
     . "c:\run\setupWebClient.ps1"
 }
@@ -1430,12 +1382,20 @@ Get-NavServerUser -serverInstance $ServerInstance -tenant default |? LicenseType
           . (Join-Path $runPath $MyInvocation.MyCommand.Name)
         ') | Set-Content -Path "$myfolder\SetupVariables.ps1"
     }
-    Copy-Item -Path (Join-Path $PSScriptRoot "updatehosts.ps1") -Destination $myfolder -Force
 
     if ($updateHosts) {
+        Copy-Item -Path (Join-Path $PSScriptRoot "updatehosts.ps1") -Destination (Join-Path $myfolder "updatehosts.ps1") -Force
         $parameters += "--volume ""c:\windows\system32\drivers\etc:C:\driversetc"""
         ('
-. (Join-Path $PSScriptRoot "updatehosts.ps1") -hostsFile "c:\driversetc\hosts" -theHostname '+$containername+' -theIpAddress $ip
+. (Join-Path $PSScriptRoot "updatehosts.ps1") -hostsFile "c:\driversetc\hosts" -theHostname "$hostname" -theIpAddress $ip
+if ($multitenant) {
+    $dotidx = $hostname.indexOf(".")
+    if ($dotidx -eq -1) { $dotidx = $hostname.Length }
+    Get-NavTenant -serverInstance $serverInstance | % {
+        $tenantHostname = $hostname.insert($dotidx,"-$($_.Id)")
+        . (Join-Path $PSScriptRoot "updatehosts.ps1") -hostsFile "c:\driversetc\hosts" -theHostname $tenantHostname -theIpAddress $ip
+    }
+}
 ') | Add-Content -Path "$myfolder\AdditionalOutput.ps1"
 
     ('
@@ -1445,8 +1405,9 @@ Get-NavServerUser -serverInstance $ServerInstance -tenant default |? LicenseType
     }
     else {
 
+        Copy-Item -Path (Join-Path $PSScriptRoot "updatehosts.ps1") -Destination (Join-Path $myfolder "updatecontainerhosts.ps1") -Force
     ('
-. (Join-Path $PSScriptRoot "updatehosts.ps1")
+. (Join-Path $PSScriptRoot "updatecontainerhosts.ps1")
 ') | Add-Content -Path "$myfolder\SetupVariables.ps1"
 
     }
@@ -1619,6 +1580,14 @@ if (-not `$restartingInstance) {
         } -argumentList ($SqlServerMemoryLimit)
     }
 
+    if ($addFontsFromPath) {
+        Add-FontsToBcContainer -containerName $containerName -path $addFontsFromPath
+    }
+
+    if ($featureKeys) {
+        Set-BcContainerFeatureKeys -containerName $containerName -featureKeys $featureKeys
+    }
+
     if ("$TimeZoneId" -ne "") {
         Write-Host "Set TimeZone in Container to $TimeZoneId"
         Invoke-ScriptInBcContainer -containerName $containerName -scriptblock { Param($TimeZoneId)
@@ -1629,7 +1598,7 @@ if (-not `$restartingInstance) {
                 }
             }
             catch {
-                Write-Host "WARNING: Unable to set TimeZone to $TimeZoneId, TimeZone is $OldTimeZoneId"
+                Write-Host -ForegroundColor Yellow "WARNING: Unable to set TimeZone to $TimeZoneId, TimeZone is $OldTimeZoneId"
             }
         } -argumentList $TimeZoneId
     }
@@ -1662,11 +1631,14 @@ if (-not `$restartingInstance) {
                 }
 
                 if ($webClientUrl.Contains('?')) {
-                    $webClientUrl += "&page=$pageno"
+                    $webClientUrl += "&page="
                 } else {
-                    $webClientUrl += "?page=$pageno"
+                    $webClientUrl += "?page="
                 }
-                New-DesktopShortcut -Name "$containerName Test Tool" -TargetPath "$webClientUrl" -IconLocation "C:\Program Files\Internet Explorer\iexplore.exe, 3" -Shortcuts $shortcuts
+                New-DesktopShortcut -Name "$containerName Test Tool" -TargetPath "$webClientUrl$pageno" -IconLocation "C:\Program Files\Internet Explorer\iexplore.exe, 3" -Shortcuts $shortcuts
+                if ($includePerformanceToolkit) {
+                    New-DesktopShortcut -Name "$containerName Performance Tool" -TargetPath "$($webClientUrl)149000" -IconLocation "C:\Program Files\Internet Explorer\iexplore.exe, 3" -Shortcuts $shortcuts
+                }
             }
             
         }
@@ -1740,7 +1712,13 @@ if (-not `$restartingInstance) {
         }
     
         if ($includeTestToolkit) {
-            Import-TestToolkitToBcContainer -containerName $containerName -sqlCredential $sqlCredential -includeTestLibrariesOnly:$includeTestLibrariesOnly -includeTestFrameworkOnly:$includeTestFrameworkOnly -doNotUseRuntimePackages:$doNotUseRuntimePackages
+            Import-TestToolkitToBcContainer `
+                -containerName $containerName `
+                -sqlCredential $sqlCredential `
+                -includeTestLibrariesOnly:$includeTestLibrariesOnly `
+                -includeTestFrameworkOnly:$includeTestFrameworkOnly `
+                -includePerformanceToolkit:$includePerformanceToolkit `
+                -doNotUseRuntimePackages:$doNotUseRuntimePackages
         }
     }
 
@@ -1906,7 +1884,7 @@ if (-not `$restartingInstance) {
                     new-item -itemtype symboliclink -path $ServiceTierAddInsFolder -name "RTC" -value (Get-Item $RtcFolder).FullName | Out-Null
                 }
             }
-        } -argumentList $dotnetAssembliesFolder
+        } -argumentList (Get-BcContainerPath -containerName $containerName -path $dotnetAssembliesFolder)
     }
 
     if (($useCleanDatabase -or $useNewDatabase) -and !$restoreBakFolder) {
@@ -1955,6 +1933,19 @@ if (-not `$restartingInstance) {
         Write-Host "Dev Service:       $devUrl"
         Write-Host "File downloads:    $dlUrl"
     }
+
+    Write-Host
+    Write-Host "Use:"
+    Write-Host -ForegroundColor Yellow -NoNewline "Get-BcContainerEventLog -containerName $containerName"
+    Write-Host " to retrieve a snapshot of the event log from the container"
+    Write-Host -ForegroundColor Yellow -NoNewline "Get-BcContainerDebugInfo -containerName $containerName"
+    Write-Host  " to get debug information about the container"
+    Write-Host -ForegroundColor Yellow -NoNewline "Enter-BcContainer -containerName $containerName"
+    Write-Host " to open a PowerShell prompt inside the container"
+    Write-Host -ForegroundColor Yellow -NoNewline "Remove-BcContainer -containerName $containerName"
+    Write-Host " to remove the container again"
+    Write-Host -ForegroundColor Yellow -NoNewline "docker logs $containerName"
+    Write-Host " to retrieve information about URL's again"
 }
 Set-Alias -Name New-NavContainer -Value New-BcContainer
 Export-ModuleMember -Function New-BcContainer -Alias New-NavContainer
